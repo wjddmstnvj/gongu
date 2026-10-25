@@ -71,8 +71,70 @@ const Store = (() => {
   function addProduct(data) {
     const p = { id: uid(), createdAt: new Date().toISOString(), reservations: [], bids: [], ...data };
     db.products.unshift(p);
+    notifyKeywordMatches(p);
     if (!save()) { db.products.shift(); return null; }
     return p;
+  }
+
+  // ---------- 키워드 알림 ----------
+  // 새 상품이 등록되면 키워드를 가진 다른 회원에게 알림을 쌓는다 (동네 상품은 그 회원의 반경 안일 때만).
+  // 서버가 생기면 이 매칭을 서버에서 하고 웹 푸시로 보내면 앱이 꺼져 있어도 알림이 간다.
+  const MAX_KEYWORDS = 20, MAX_NOTIFICATIONS = 100;
+  const matchesKeyword = (p, k) => [p.title, p.desc, ...p.cat].join(' ').toLowerCase().includes(k.toLowerCase());
+
+  function distanceM(a, b) {
+    const R = 6371000, rad = x => x * Math.PI / 180;
+    const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function notifyKeywordMatches(p) {
+    db.keywords ||= {}; db.notifications ||= {};
+    for (const user of db.users) {
+      if (user.id === p.sellerId) continue;
+      const hit = (db.keywords[user.id] || []).find(k => matchesKeyword(p, k));
+      if (!hit) continue;
+      if (p.type === 'local' && (!p.location || distanceM(user.location, p.location) > user.radius)) continue;
+      const list = db.notifications[user.id] ||= [];
+      list.unshift({ id: uid(), productId: p.id, keyword: hit, title: p.title, type: p.type, at: p.createdAt, read: false, delivered: false });
+      list.length = Math.min(list.length, MAX_NOTIFICATIONS);
+    }
+  }
+
+  const keywords = () => db.keywords?.[db.session] || [];
+
+  function addKeyword(word) {
+    const k = word.trim().replace(/\s+/g, ' ');
+    if (!k) throw new Error('키워드를 입력해 주세요.');
+    if (k.length > 20) throw new Error('키워드는 20자 이내로 입력해 주세요.');
+    const list = keywords();
+    if (list.some(x => x.toLowerCase() === k.toLowerCase())) throw new Error('이미 등록한 키워드예요.');
+    if (list.length >= MAX_KEYWORDS) throw new Error(`키워드는 ${MAX_KEYWORDS}개까지 등록할 수 있어요.`);
+    (db.keywords ||= {})[db.session] = [...list, k];
+    save();
+    return k;
+  }
+
+  function removeKeyword(k) {
+    db.keywords[db.session] = keywords().filter(x => x !== k);
+    save();
+  }
+
+  const notifications = () => db.notifications?.[db.session] || [];
+  const unreadCount = () => notifications().filter(n => !n.read).length;
+
+  function markRead(id) {
+    for (const n of notifications()) if (!id || n.id === id) n.read = true;
+    save();
+  }
+
+  // 아직 휴대폰 알림/토스트로 알리지 않은 것을 꺼내고 전달됨으로 표시
+  function takeUndelivered() {
+    const list = notifications().filter(n => !n.delivered);
+    if (!list.length) return [];
+    list.forEach(n => { n.delivered = true; });
+    save();
+    return list;
   }
 
   function updateProduct(id, patch) {
@@ -209,5 +271,6 @@ const Store = (() => {
     capacity, reserved, remaining, unitPrice, depositFor, myReservation, reserve, cancelReservation,
     placeBid, currentPrice,
     interests, isInterested, toggleInterest,
+    keywords, addKeyword, removeKeyword, matchesKeyword, notifications, unreadCount, markRead, takeUndelivered,
   };
 })();

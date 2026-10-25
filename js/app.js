@@ -253,7 +253,9 @@ function topbar(title) {
   const left = title
     ? `<h1>${title}</h1>`
     : `<button class="loc-btn" data-go="my">${icon('pin', 18)}${esc(shortLoc(me.location))}<small>${fmtRadius(me.radius)}</small></button><span class="spacer"></span>`;
-  return `<header class="topbar">${left}<button class="reg-btn" data-go="register">${icon('plus', 16)}상품등록</button></header>`;
+  const unread = Store.unreadCount();
+  const bell = `<button class="icon-only bell" data-go="alerts" aria-label="알림 ${unread}개">${icon('bell', 22)}${unread ? `<i class="badge-dot">${unread > 99 ? '99+' : unread}</i>` : ''}</button>`;
+  return `<header class="topbar">${left}${bell}<button class="reg-btn" data-go="register">${icon('plus', 16)}상품등록</button></header>`;
 }
 
 function searchBar(route) {
@@ -715,6 +717,72 @@ function submitRegister() {
   location.replace('#/detail/' + p.id);
 }
 
+// ---------- 키워드 알림 ----------
+function pushStatus() {
+  if (!('Notification' in window)) return { text: '이 브라우저는 알림 미지원 (아이폰은 홈 화면에 추가한 앱에서 가능)', can: false };
+  if (Notification.permission === 'granted') return { text: '켜짐', on: true };
+  if (Notification.permission === 'denied') return { text: '차단됨 · 브라우저 설정에서 알림을 허용해 주세요', can: false };
+  return { text: '꺼짐', can: true };
+}
+
+function keywordBox() {
+  const kws = Store.keywords();
+  const visibleProducts = visible(Store.products());
+  const ps = pushStatus();
+  return `
+    <div class="box">
+      <h3 class="icon-title">${icon('bell', 18)}키워드 알림</h3>
+      <form class="kw-form" id="kwForm">
+        <input class="input" name="kw" maxlength="20" placeholder="예: 감귤, 휴지, 기저귀" autocomplete="off" enterkeyhint="done">
+        <button class="btn-sm add">추가</button>
+      </form>
+      ${kws.length ? `<div class="kw-chips">${kws.map(k => {
+        const n = visibleProducts.filter(p => Store.matchesKeyword(p, k)).length;
+        return `<span class="kw"><button class="kw-name" data-act="kwSearch" data-kw="${esc(k)}">${esc(k)}<small>${n}</small></button><button class="kw-x" data-act="rmKw" data-kw="${esc(k)}" aria-label="${esc(k)} 삭제">${icon('close', 12)}</button></span>`;
+      }).join('')}</div>` : ''}
+      <div class="hint">키워드가 들어간 상품이 새로 등록되면 알려드려요. 동네 상품은 내 반경 안의 것만 알려요. 숫자는 지금 등록된 상품 수예요.</div>
+      <div class="push-row"><span>휴대폰 알림 <small>${esc(ps.text)}</small></span>
+        ${ps.on ? `<button class="btn-sm" data-act="testPush">테스트</button>` : ps.can ? `<button class="btn-sm" data-act="pushPerm">켜기</button>` : ''}</div>
+    </div>`;
+}
+
+function viewAlerts() {
+  const list = Store.notifications();
+  return `
+    <header class="topbar"><button class="back" data-act="back" aria-label="뒤로">${icon('back', 22)}</button><h1>알림</h1>
+      ${list.some(n => !n.read) ? '<button class="btn-sm" data-act="readAll">모두 읽음</button>' : ''}</header>
+    ${list.length ? list.map(n => {
+      const p = Store.product(n.productId);
+      return `<button class="alert ${n.read ? '' : 'unread'}" data-alert="${n.id}" ${p ? '' : 'disabled'}>
+        <span class="alert-ic">${icon('bell', 18)}</span>
+        <span class="alert-body"><small>'${esc(n.keyword)}' 키워드 · ${TYPES[n.type].name}</small>
+          <b>${esc(n.title)}</b><small>${p ? timeAgo(n.at) : '삭제된 상품이에요'}</small></span>
+      </button>`;
+    }).join('') : `<div class="empty">아직 알림이 없어요.<br>마이페이지에서 키워드를 등록하면<br>관련 상품이 올라올 때 알려드려요.<br><br><button class="btn-sm" data-go="my">키워드 설정하러 가기</button></div>`}`;
+}
+
+// 아직 알리지 않은 키워드 알림: 알림 권한이 있으면 휴대폰 알림, 없으면 토스트
+async function deliverNotifications() {
+  if (!Store.currentUser()) return;
+  const list = Store.takeUndelivered();
+  if (!list.length) return;
+  if ('Notification' in window && Notification.permission === 'granted') {
+    for (const n of list) await showSystemNotification(`'${n.keyword}' 새 상품이 올라왔어요`, n.title, `#/detail/${n.productId}`, n.id);
+  } else {
+    toast(`키워드 알림 ${list.length}개가 도착했어요`);
+  }
+}
+
+async function showSystemNotification(title, body, url, tag) {
+  const opts = { body, tag, icon: 'icon.svg', badge: 'icon.svg', data: { url } };
+  try {
+    const reg = 'serviceWorker' in navigator && await navigator.serviceWorker.getRegistration();
+    if (reg) return await reg.showNotification(title, opts);
+  } catch { /* 아래 방식으로 */ }
+  const n = new Notification(title, opts);
+  n.onclick = () => { window.focus(); location.hash = url; n.close(); };
+}
+
 // ---------- 화면: 마이페이지 ----------
 function calendarEvents() {
   const events = {};
@@ -779,6 +847,8 @@ function viewMy() {
       : `<button class="btn line icon-btn" data-act="regps" style="padding:10px;font-size:14px">${icon('pin', 16)}현재 위치로 동네 다시 설정</button>`}
     </div>
 
+    ${keywordBox()}
+
     <div class="box" style="padding:14px 0">
       <h3 style="padding:0 16px" class="icon-title">${icon('calendar', 18)}내 관심 일정</h3>
       ${calendarHtml()}
@@ -805,11 +875,11 @@ function render() {
   saveScrollers();
   if (LIST_PAGES.includes(route)) $app.innerHTML = listPage(route, entering);
   else {
-    const views = { my: viewMy, register: viewRegister, edit: () => viewEdit(arg), detail: () => viewDetail(arg) };
+    const views = { my: viewMy, register: viewRegister, edit: () => viewEdit(arg), detail: () => viewDetail(arg), alerts: viewAlerts };
     $app.innerHTML = (views[route] || (() => listPage('home', entering)))();
   }
   S.route = route;
-  $tabbar.hidden = ['detail', 'register', 'edit'].includes(route);
+  $tabbar.hidden = ['detail', 'register', 'edit', 'alerts'].includes(route);
   $tabbar.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.nav === route));
   restoreScrollers(!entering);
 }
@@ -916,11 +986,16 @@ window.addEventListener('pointerup', () => {
 const parseCat = v => v ? v.split('>') : [];
 
 $app.addEventListener('click', async e => {
-  const el = e.target.closest('[data-go],[data-act],[data-auth],[data-catpick],[data-day],[data-mytab]');
+  const el = e.target.closest('[data-go],[data-act],[data-auth],[data-catpick],[data-day],[data-mytab],[data-alert]');
   if (!el) return;
   const d = el.dataset;
 
   if (d.go !== undefined) return go(d.go);
+  if (d.alert) {
+    const n = Store.notifications().find(x => x.id === d.alert);
+    Store.markRead(d.alert);
+    return go('detail/' + n.productId);
+  }
   if (d.auth) { S.authMode = d.auth; return render(); }
   if (d.catpick !== undefined) { S.cats[S.route] = parseCat(d.catpick); return rerender(); }
   if (d.day) { S.calSel = d.day; return rerender(); }
@@ -940,6 +1015,23 @@ $app.addEventListener('click', async e => {
       return rerender();
     }
     case 'edit': return go('edit/' + d.id);
+    case 'rmKw':
+      Store.removeKeyword(d.kw);
+      toast(`'${d.kw}' 키워드를 삭제했어요`);
+      return rerender();
+    case 'kwSearch':
+      S.q.home = d.kw; S.cats.home = [];
+      return go('home');
+    case 'readAll':
+      Store.markRead();
+      return rerender();
+    case 'pushPerm': {
+      const result = await Notification.requestPermission();
+      toast(result === 'granted' ? '휴대폰 알림을 켰어요' : '알림이 허용되지 않았어요');
+      return rerender();
+    }
+    case 'testPush':
+      return showSystemNotification('공구마을 알림 테스트', '키워드 상품이 올라오면 이렇게 알려드려요', '#/my', 'test');
     case 'placeFromLoc':
       S.reg.place = Store.currentUser().location.label;
       return rerender();
@@ -1016,6 +1108,16 @@ $app.addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target;
   if (f.id === 'regForm') return submitRegister();
+  if (f.id === 'kwForm') {
+    try {
+      const k = Store.addKeyword(f.kw.value);
+      const n = visible(Store.products()).filter(p => Store.matchesKeyword(p, k)).length;
+      toast(`'${k}' 등록 · 지금 올라온 상품 ${n}개`);
+      rerender();
+      $app.querySelector('#kwForm [name=kw]')?.focus();
+    } catch (ex) { toast(ex.message); }
+    return;
+  }
   const err = document.getElementById('authErr');
   const v = Object.fromEntries(new FormData(f));
   try {
@@ -1033,6 +1135,7 @@ $app.addEventListener('submit', async e => {
     }
     go('home');
     render();
+    deliverNotifications();
   } catch (ex) { err.textContent = ex.message; }
 });
 
@@ -1097,3 +1200,6 @@ $app.addEventListener('change', async e => {
 });
 
 render();
+deliverNotifications();
+// 앱으로 돌아올 때 새로 쌓인 알림 전달
+document.addEventListener('visibilitychange', () => { if (!document.hidden) deliverNotifications(); });
