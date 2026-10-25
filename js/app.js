@@ -24,7 +24,8 @@ const S = {
   authMode: 'login',
   region: null,        // 동네 선택 중인 상태 (회원가입 / 마이페이지 재설정 공용)
   relocating: false,
-  reg: null,
+  reg: null,           // 상품 등록/수정 폼 상태 (수정 중이면 editId)
+  sheet: null,         // 예약 시트 { id, qty, pay, paying }
 };
 
 // ---------- 유틸 ----------
@@ -82,6 +83,21 @@ const matchCat = (p, cat) => cat.every((c, i) => p.cat[i] === c);
 const matchQuery = (p, q) => !q || [p.title, p.desc, ...p.cat].join(' ').toLowerCase().includes(q.trim().toLowerCase());
 const byNewest = (a, b) => new Date(b.createdAt) - new Date(a.createdAt);
 const byStart = (a, b) => new Date(a.startAt) - new Date(b.startAt);
+const maskId = id => id.slice(0, 2) + '***';
+
+// 공구 방법 표시: 무게(균등 분할) / 개별 수량
+function fmtWeight(w, unit) {
+  if (unit === 'kg' && w < 1) return `${Math.round(w * 1000)}g`;
+  return `${Math.round(w * 100) / 100}${unit}`;
+}
+const shareWeight = p => p.totalWeight ? fmtWeight(p.totalWeight / p.recruit, p.weightUnit) : '1인분';
+const methodText = p => p.method === 'unit'
+  ? `개별 수량 · 총 ${p.totalQty}${esc(p.qtyUnit)}`
+  : `무게로 나누기 · ${p.totalWeight ? `총 ${fmtWeight(p.totalWeight, p.weightUnit)}을 ` : ''}${p.recruit}명이 ${shareWeight(p)}씩`;
+const progressText = p => p.method === 'unit'
+  ? `${Store.reserved(p)} / ${p.totalQty}${esc(p.qtyUnit)}`
+  : `${p.reservations.length} / ${p.recruit}명`;
+const qtyText = (p, qty) => p.method === 'unit' ? `${qty}${esc(p.qtyUnit)}` : shareWeight(p);
 
 function getPosition() {
   return new Promise((resolve, reject) => {
@@ -208,11 +224,15 @@ function itemCard(p) {
   if (p.type === 'auction') {
     const cur = Store.currentPrice(p);
     price = `현재가 ${won(cur)} <small>1인 ${won(perPerson(cur, p.recruit))}</small>`;
+  } else if (p.method === 'unit') {
+    price = `${esc(p.qtyUnit)}당 ${won(Store.unitPrice(p))} <small>총 ${p.totalQty}${esc(p.qtyUnit)} ${won(p.totalPrice)}</small>`;
   } else {
-    price = `1인 ${won(perPerson(p.totalPrice, p.recruit))} <small>총 ${won(p.totalPrice)}</small>`;
+    price = `1인 ${won(Store.unitPrice(p))} <small>${shareWeight(p)} · 총 ${won(p.totalPrice)}</small>`;
   }
-  const count = p.type === 'auction' ? `입찰 ${p.bids.length}건 · ${p.recruit}명 분배` : `${p.participants.length}/${p.recruit}명 참여`;
-  const pct = p.type === 'auction' ? 0 : Math.min(100, p.participants.length / p.recruit * 100);
+  const myRes = p.type !== 'auction' && Store.myReservation(p);
+  const count = p.type === 'auction' ? `입찰 ${p.bids.length}건 · ${p.recruit}명 분배`
+    : myRes ? `<span class="mine">내 예약 ${qtyText(p, myRes.qty)} · 예약금 결제완료</span>` : `${progressText(p)} 예약`;
+  const pct = p.type === 'auction' ? 0 : Math.min(100, Store.reserved(p) / Store.capacity(p) * 100);
   return `
     <button class="item" data-go="detail/${p.id}">
       <div class="thumb">${thumb(p)}</div>
@@ -344,6 +364,14 @@ function results(route) {
 }
 
 // ---------- 화면: 상세 ----------
+const PAY_METHODS = [
+  ['kakao', '카카오페이', '#FEE500'],
+  ['naver', '네이버페이', '#03C75A'],
+  ['toss', '토스페이', '#0064FF'],
+  ['card', '신용·체크카드', '#9aa1ab'],
+];
+const payName = k => (PAY_METHODS.find(m => m[0] === k) || [, '기존 참여'])[1];
+
 function viewDetail(id) {
   const p = Store.product(id);
   const backBar = t => `<header class="topbar"><button class="back" data-act="back" aria-label="뒤로">${icon('back', 22)}</button><h1>${t}</h1>`;
@@ -354,78 +382,180 @@ function viewDetail(id) {
   const notStarted = p.startAt && new Date(p.startAt) > now;
   const mine = p.sellerId === me.id;
   const liked = Store.isInterested(p.id);
-  const cur = Store.currentPrice(p);
+  const isAuction = p.type === 'auction';
 
   const gallery = p.photos.length ? p.photos.map(src => `<img src="${src}" alt="">`).join('') : `<div class="ph">${icon(p.cat[0], 96)}</div>`;
 
   const rows = [];
-  if (p.type === 'auction') {
+  if (isAuction) {
+    const cur = Store.currentPrice(p);
     rows.push(['시작가(총액)', won(p.totalPrice)], ['현재가', `<span style="color:var(--auction)">${won(cur)}</span>`], ['입찰 단위', won(p.bidUnit)],
       ['분배 인원', `${p.recruit}명`], ['1인당 가격', won(perPerson(cur, p.recruit))], ['경매 시작', fmtDate(p.startAt)], ['경매 마감', `${fmtDate(p.deadline)} · ${remain(p.deadline)}`]);
   } else {
-    rows.push(['총 물품가격', won(p.totalPrice)], ['모집인원', `${p.participants.length} / ${p.recruit}명`], ['1인당 가격', `<span style="color:var(--brand)">${won(perPerson(p.totalPrice, p.recruit))}</span>`]);
+    rows.push(['공구 방법', methodText(p)], ['총 물품가격', won(p.totalPrice)]);
+    if (p.method === 'unit') rows.push([`${esc(p.qtyUnit)}당 가격`, `<span style="color:var(--brand)">${won(Store.unitPrice(p))}</span>`]);
+    else rows.push(['1인당', `${shareWeight(p)} · <span style="color:var(--brand)">${won(Store.unitPrice(p))}</span>`]);
+    rows.push(['예약 현황', progressText(p)], ['예약금', `${p.depositRate}% 선결제 · 잔금은 거래 때 결제`]);
     if (p.startAt) rows.push(['판매 시작', fmtDate(p.startAt)]);
     rows.push(['모집기한', `${fmtDate(p.deadline)} · ${remain(p.deadline)}`]);
-    if (p.type === 'local') rows.push(['거리', `내 위치에서 ${fmtDist(distance(me.location, p.location))}`]);
-    if (p.liveAt) rows.push(['라이브 방송', fmtDate(p.liveAt)]);
-    if (p.snsLink) rows.push(['공구 링크', `<a href="${esc(p.snsLink)}" target="_blank" rel="noopener">${esc(p.snsLink)}</a>`]);
   }
+  if (p.place) rows.push(['거래 장소', esc(p.place)]);
+  if (p.type === 'local') rows.push(['거리', `내 위치에서 ${fmtDist(distance(me.location, p.location))}`]);
+  if (p.liveAt) rows.push(['라이브 방송', fmtDate(p.liveAt)]);
+  if (p.snsLink) rows.push(['공구 링크', `<a href="${esc(p.snsLink)}" target="_blank" rel="noopener">${esc(p.snsLink)}</a>`]);
 
+  const myRes = !isAuction && Store.myReservation(p);
   let action;
-  if (closed) action = `<button class="btn" disabled>마감되었습니다</button>`;
+  if (mine) action = `<button class="btn line icon-btn" data-act="edit" data-id="${p.id}">${icon('edit', 18)}상품 수정</button>`;
+  else if (myRes) action = `<button class="btn line" data-act="cancelResv" data-id="${p.id}" ${closed ? 'disabled' : ''}>${closed ? '예약 완료 · 모집 마감' : '예약 취소 (예약금 환불)'}</button>`;
+  else if (closed) action = `<button class="btn" disabled>마감되었습니다</button>`;
   else if (notStarted) action = `<button class="btn dark" disabled>${fmtDate(p.startAt)} 시작</button>`;
-  else if (p.type === 'auction') {
+  else if (isAuction) {
+    const cur = Store.currentPrice(p);
     const min = cur + (p.bids.length ? p.bidUnit : 0);
     action = `<input class="input" id="bidInput" type="number" inputmode="numeric" min="${min}" step="${p.bidUnit}" value="${min}"><button class="btn" data-act="bid" data-id="${p.id}">입찰하기</button>`;
-  } else {
-    const joined = p.participants.includes(me.id);
-    const full = p.participants.length >= p.recruit;
-    action = joined
-      ? `<button class="btn line" data-act="join" data-id="${p.id}">참여 취소</button>`
-      : `<button class="btn" data-act="join" data-id="${p.id}" ${full ? 'disabled' : ''}>${full ? '모집 완료' : `참여하기 · ${won(perPerson(p.totalPrice, p.recruit))}`}</button>`;
-  }
+  } else if (Store.remaining(p) <= 0) action = `<button class="btn" disabled>예약 마감</button>`;
+  else action = `<button class="btn" data-act="openSheet" data-id="${p.id}">예약하기 · 예약금 ${p.depositRate}%</button>`;
 
-  const bids = p.type === 'auction' && p.bids.length
-    ? `<div class="bids"><h3 style="font-size:15px">입찰 내역</h3>${[...p.bids].reverse().map(b => `<div><span>${esc(b.userId === me.id ? '나' : b.userId.slice(0, 2) + '***')}</span><span>${won(b.amount)}</span><span style="color:var(--sub)">${timeAgo(b.at)}</span></div>`).join('')}</div>`
+  const myResBox = myRes ? `
+    <div class="resv-box">
+      <b>${icon('card', 18)}내 예약</b>
+      <div class="line"><span>예약 수량</span><span>${qtyText(p, myRes.qty)}</span></div>
+      <div class="line"><span>상품 금액</span><span>${won(myRes.amount)}</span></div>
+      <div class="line"><span>예약금 (${payName(myRes.payMethod)})</span><span>${won(myRes.deposit)} 결제완료</span></div>
+      <div class="line total"><span>거래 때 낼 잔금</span><span>${won(myRes.amount - myRes.deposit)}</span></div>
+    </div>` : '';
+
+  const resvList = mine && !isAuction ? `
+    <div class="bids"><h3 style="font-size:15px">예약자 ${p.reservations.length}명</h3>
+      ${p.reservations.length ? p.reservations.map(r => `<div><span>${esc(maskId(r.userId))}</span><span>${qtyText(p, r.qty)}</span><span>예약금 ${won(r.deposit)}</span></div>`).join('') : '<p class="hint">아직 예약자가 없어요.</p>'}
+    </div>` : '';
+
+  const bids = isAuction && p.bids.length
+    ? `<div class="bids"><h3 style="font-size:15px">입찰 내역</h3>${[...p.bids].reverse().map(b => `<div><span>${esc(b.userId === me.id ? '나' : maskId(b.userId))}</span><span>${won(b.amount)}</span><span style="color:var(--sub)">${timeAgo(b.at)}</span></div>`).join('')}</div>`
     : '';
 
+  const pct = isAuction ? 0 : Math.min(100, Store.reserved(p) / Store.capacity(p) * 100);
   return `
     ${backBar(`${TYPES[p.type].name} 상품`)}
-      ${mine ? `<button class="icon-only" data-act="delete" data-id="${p.id}" aria-label="삭제">${icon('trash', 20)}</button>` : ''}</header>
+      ${mine ? `<button class="icon-only" data-act="edit" data-id="${p.id}" aria-label="수정">${icon('edit', 20)}</button><button class="icon-only" data-act="delete" data-id="${p.id}" aria-label="삭제">${icon('trash', 20)}</button>` : ''}</header>
     <div class="gallery">${gallery}</div>
     <div class="detail">
-      <span class="badge ${p.type}">${TYPES[p.type].name}</span>${mine ? '<span class="badge gray">내 상품</span>' : ''}
+      <span class="badge ${p.type}">${TYPES[p.type].name}</span>${mine ? '<span class="badge gray">내 상품</span>' : ''}${p.updatedAt ? '<span class="badge gray">수정됨</span>' : ''}
       <h2>${esc(p.title)}</h2>
       <div class="path">${esc(p.cat.join(' > '))} · ${timeAgo(p.createdAt)}</div>
       <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
-      ${p.type !== 'auction' ? `<div class="bar"><i style="width:${Math.min(100, p.participants.length / p.recruit * 100)}%"></i></div>` : ''}
+      ${isAuction ? '' : `<div class="bar"><i style="width:${pct}%"></i></div>`}
+      ${myResBox}
       <div class="desc">${esc(p.desc)}</div>
-      ${bids}
+      ${resvList}${bids}
     </div>
     <div class="actionbar">
       <button class="heart ${liked ? 'on' : ''}" data-act="like" data-id="${p.id}">${icon('heart', 24, liked ? 'filled' : '')}<small>${liked ? '담김' : '관심'}</small></button>
       ${action}
+    </div>
+    <div id="sheet">${S.sheet?.id === p.id ? sheetHtml(p) : ''}</div>`;
+}
+
+// 예약 + 예약금 간편결제 시트
+function sheetHtml(p) {
+  const s = S.sheet;
+  const isUnit = p.method === 'unit';
+  const qty = isUnit ? s.qty : 1;
+  const amount = Store.unitPrice(p) * qty;
+  const deposit = Store.depositFor(p, amount);
+  return `
+    <div class="sheet-bg" data-act="closeSheet"></div>
+    <div class="sheet" role="dialog" aria-label="예약하기">
+      <div class="sheet-handle"></div>
+      <h3>예약하기</h3>
+      <div class="sheet-item"><div class="thumb sm">${thumb(p)}</div><div><b>${esc(p.title)}</b><div class="meta">${methodText(p)}</div></div></div>
+      ${isUnit ? `
+        <div class="qty-row"><span>구매 수량</span>
+          <div class="stepper"><button data-act="qtyMinus" ${qty <= 1 ? 'disabled' : ''} aria-label="빼기">−</button><b>${qty}${esc(p.qtyUnit)}</b><button data-act="qtyPlus" ${qty >= Store.remaining(p) ? 'disabled' : ''} aria-label="더하기">+</button></div></div>
+        <div class="hint" style="text-align:right">남은 수량 ${Store.remaining(p)}${esc(p.qtyUnit)} · ${esc(p.qtyUnit)}당 ${won(Store.unitPrice(p))}</div>`
+      : `<div class="qty-row"><span>내 몫</span><b>${shareWeight(p)} (1인분)</b></div>`}
+      <div class="calc" style="margin-top:12px">
+        <div class="line"><span>상품 금액</span><b>${won(amount)}</b></div>
+        <div class="line"><span>예약금 (${p.depositRate}%)</span><b>${won(deposit)}</b></div>
+        <div class="line"><span>잔금 (거래 때 결제)</span><b>${won(amount - deposit)}</b></div>
+        <div class="line total"><span>지금 결제할 금액</span><span>${won(deposit)}</span></div>
+      </div>
+      <div class="label" style="margin:14px 0 8px">간편결제</div>
+      <div class="pay-grid">${PAY_METHODS.map(([k, n, c]) => `<label><input type="radio" name="pay" value="${k}" ${s.pay === k ? 'checked' : ''}><span><i style="background:${c}"></i>${n}</span></label>`).join('')}</div>
+      <button class="btn" data-act="pay" style="margin-top:14px" ${s.paying ? 'disabled' : ''}>${s.paying ? '결제 진행 중…' : `예약금 ${won(deposit)} 결제하고 예약`}</button>
+      <p class="fine">테스트 결제예요 · 실제로 돈이 나가지 않아요<br>모집이 안 되거나 예약을 취소하면 예약금은 전액 환불돼요</p>
     </div>`;
 }
 
-// ---------- 화면: 상품등록 ----------
+function refreshSheet() {
+  const el = document.getElementById('sheet');
+  const p = S.sheet && Store.product(S.sheet.id);
+  if (el) el.innerHTML = p ? sheetHtml(p) : '';
+}
+
+// ---------- 화면: 상품등록 / 수정 ----------
 function newReg() {
   const d = new Date(); d.setDate(d.getDate() + 3); d.setHours(20, 0, 0, 0);
-  return { type: 'local', cat: ['', '', ''], photos: [], title: '', desc: '', totalPrice: '', recruit: '', bidUnit: '1000', deadline: toLocalInput(d), startAt: '', snsLink: '', liveAt: '' };
+  return {
+    type: 'local', cat: ['', '', ''], photos: [], title: '', desc: '', totalPrice: '', recruit: '', bidUnit: '1000',
+    deadline: toLocalInput(d), startAt: '', snsLink: '', liveAt: '', place: '',
+    method: 'weight', totalWeight: '', weightUnit: 'kg', totalQty: '', qtyUnit: '개', depositRate: '10',
+  };
+}
+
+function editReg(p) {
+  const opt = (v, f = x => x) => v == null ? '' : String(f(v));
+  return {
+    editId: p.id, type: p.type, cat: [...p.cat], photos: [...p.photos], title: p.title, desc: p.desc,
+    totalPrice: opt(p.totalPrice), recruit: opt(p.recruit), bidUnit: opt(p.bidUnit ?? 1000),
+    deadline: toLocalInput(p.deadline), startAt: opt(p.startAt, toLocalInput), snsLink: p.snsLink || '', liveAt: opt(p.liveAt, toLocalInput),
+    place: p.place || '', method: p.method || 'weight', totalWeight: opt(p.totalWeight), weightUnit: p.weightUnit || 'kg',
+    totalQty: opt(p.totalQty), qtyUnit: p.qtyUnit || '개', depositRate: String(p.depositRate ?? 10),
+  };
 }
 
 function viewRegister() {
   const r = S.reg ||= newReg();
+  const editing = r.editId && Store.product(r.editId);
+  const hasResv = editing && editing.reservations?.length > 0;
+  const hasBids = editing && editing.bids?.length > 0;
   const [l, m] = r.cat;
   const opt = (arr, sel, ph) => `<option value="">${ph}</option>` + arr.map(x => `<option ${x === sel ? 'selected' : ''}>${esc(x)}</option>`).join('');
   const isAuction = r.type === 'auction';
+  const me = Store.currentUser();
+
+  const methodFields = isAuction ? '' : `
+      <div class="field">
+        <span class="label">공구 방법</span>
+        <div class="radio-row method">
+          <label><input type="radio" name="method" value="weight" ${r.method === 'weight' ? 'checked' : ''} ${hasResv ? 'disabled' : ''}><span><b>무게로 나누기</b><small>총 중량을 인원수대로</small></span></label>
+          <label><input type="radio" name="method" value="unit" ${r.method === 'unit' ? 'checked' : ''} ${hasResv ? 'disabled' : ''}><span><b>개별 수량</b><small>원하는 개수만큼 예약</small></span></label>
+        </div>
+      </div>
+      ${r.method === 'unit' ? `
+        <div class="row">
+          <div class="field"><label>나눌 총 수량</label><input class="input" data-bind="totalQty" type="number" inputmode="numeric" min="2" value="${esc(r.totalQty)}" placeholder="예: 24"></div>
+          <div class="field"><label>단위</label><input class="input" data-bind="qtyUnit" maxlength="4" value="${esc(r.qtyUnit)}" placeholder="개, 병, 봉…"></div>
+        </div>` : `
+        <div class="row">
+          <div class="field"><label>총 중량</label><input class="input" data-bind="totalWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${esc(r.totalWeight)}" placeholder="예: 10"></div>
+          <div class="field"><label>단위</label><select data-bind="weightUnit">${['kg', 'g'].map(u => `<option ${r.weightUnit === u ? 'selected' : ''}>${u}</option>`).join('')}</select></div>
+          <div class="field"><label>모집인원</label><input class="input" data-bind="recruit" type="number" inputmode="numeric" min="2" value="${esc(r.recruit)}" placeholder="명"></div>
+        </div>`}
+      <div class="field">
+        <span class="label">예약금 비율</span>
+        <div class="radio-row">${['10', '20', '30'].map(v => `<label><input type="radio" name="depositRate" value="${v}" ${r.depositRate === v ? 'checked' : ''}><span>${v}%</span></label>`).join('')}</div>
+        <div class="hint">예약할 때 상품 금액의 이 비율만 간편결제로 먼저 받고, 잔금은 거래 때 받아요.</div>
+      </div>`;
 
   return `
-    <header class="topbar"><button class="back" data-act="back" aria-label="뒤로">${icon('back', 22)}</button><h1>상품 등록</h1><button class="btn-sm" data-act="resetReg">초기화</button></header>
+    <header class="topbar"><button class="back" data-act="back" aria-label="뒤로">${icon('back', 22)}</button><h1>${editing ? '상품 수정' : '상품 등록'}</h1>${editing ? '' : '<button class="btn-sm" data-act="resetReg">초기화</button>'}</header>
     <form class="form" id="regForm" novalidate>
+      ${hasResv || hasBids ? `<div class="notice">${hasResv ? `예약자가 ${editing.reservations.length}명 있어서 판매 페이지와 공구 방법은 바꿀 수 없어요. 수량·인원은 이미 예약된 만큼보다 줄일 수 없어요.` : '입찰이 있어서 시작가와 입찰 단위는 바꿀 수 없어요.'}</div>` : ''}
       <div class="field">
         <span class="label">판매 페이지 선택</span>
-        <div class="type-cards">${Object.entries(TYPES).map(([k, v]) => `<label><input type="radio" name="type" value="${k}" ${r.type === k ? 'checked' : ''}><span>${icon(k, 26)}${v.name}<small>${v.desc}</small></span></label>`).join('')}</div>
+        <div class="type-cards">${Object.entries(TYPES).map(([k, v]) => `<label><input type="radio" name="type" value="${k}" ${r.type === k ? 'checked' : ''} ${editing ? 'disabled' : ''}><span>${icon(k, 26)}${v.name}<small>${v.desc}</small></span></label>`).join('')}</div>
       </div>
 
       <div class="field">
@@ -447,17 +577,25 @@ function viewRegister() {
       </div>
 
       <div class="field"><label>상품명</label><input class="input" data-bind="title" maxlength="60" value="${esc(r.title)}" placeholder="예: 제주 감귤 10kg 나눠요"></div>
-      <div class="field"><label>상세 설명</label><textarea data-bind="desc" placeholder="수령 방법, 장소, 상품 상태 등을 적어주세요">${esc(r.desc)}</textarea></div>
+      <div class="field"><label>상세 설명</label><textarea data-bind="desc" placeholder="상품 상태, 유통기한, 수령 방법 등을 적어주세요">${esc(r.desc)}</textarea></div>
+
+      <div class="field">
+        <label>거래 장소${r.type === 'local' ? '' : ' (선택)'}</label>
+        <input class="input" data-bind="place" maxlength="60" value="${esc(r.place)}" placeholder="${r.type === 'local' ? '예: 중곡역 2번 출구 앞' : '예: 택배 배송 / 매장 픽업'}">
+        ${r.type === 'local' ? `<button type="button" class="btn-sm icon-btn" data-act="placeFromLoc" style="margin-top:6px">${icon('pin', 14)}내 동네 주소 넣기 (${esc(shortLoc(me.location))})</button>` : ''}
+      </div>
 
       ${r.type === 'group' ? `
         <div class="field"><label>인스타그램 / 라이브방송 링크</label><input class="input" data-bind="snsLink" type="url" value="${esc(r.snsLink)}" placeholder="https://instagram.com/..."></div>
         <div class="field"><label>라이브 방송 일시 (선택)</label><input class="input" data-bind="liveAt" type="datetime-local" value="${esc(r.liveAt)}"></div>` : ''}
 
+      ${methodFields}
+
       <div class="row">
-        <div class="field"><label>${isAuction ? '경매 시작가 (총액)' : '총 물품가격'}</label><input class="input" data-bind="totalPrice" type="number" inputmode="numeric" min="0" value="${esc(r.totalPrice)}" placeholder="원"></div>
-        <div class="field"><label>${isAuction ? '분배 인원' : '모집인원'}</label><input class="input" data-bind="recruit" type="number" inputmode="numeric" min="2" value="${esc(r.recruit)}" placeholder="명"></div>
+        <div class="field"><label>${isAuction ? '경매 시작가 (총액)' : '총 물품가격'}</label><input class="input" data-bind="totalPrice" type="number" inputmode="numeric" min="0" value="${esc(r.totalPrice)}" placeholder="원" ${hasBids ? 'disabled' : ''}></div>
+        ${isAuction ? `<div class="field"><label>분배 인원</label><input class="input" data-bind="recruit" type="number" inputmode="numeric" min="2" value="${esc(r.recruit)}" placeholder="명"></div>` : ''}
       </div>
-      ${isAuction ? `<div class="field"><label>입찰 단위</label><input class="input" data-bind="bidUnit" type="number" inputmode="numeric" min="100" step="100" value="${esc(r.bidUnit)}"></div>` : ''}
+      ${isAuction ? `<div class="field"><label>입찰 단위</label><input class="input" data-bind="bidUnit" type="number" inputmode="numeric" min="100" step="100" value="${esc(r.bidUnit)}" ${hasBids ? 'disabled' : ''}></div>` : ''}
 
       <div class="calc" id="calc">${calcHtml(r)}</div>
 
@@ -465,18 +603,40 @@ function viewRegister() {
       <div class="field"><label>${isAuction ? '경매 마감 일시' : '모집기한'}</label><input class="input" data-bind="deadline" type="datetime-local" value="${esc(r.deadline)}"></div>
 
       <div class="err" id="regErr"></div>
-      <button class="btn">등록하기</button>
+      <button class="btn">${editing ? '수정 완료' : '등록하기'}</button>
     </form>`;
 }
 
 function calcHtml(r) {
-  const total = Number(r.totalPrice) || 0, n = Number(r.recruit) || 0;
-  const label = r.type === 'auction' ? '시작가 기준 ' : '';
+  const total = Number(r.totalPrice) || 0;
+  const rate = Number(r.depositRate) || 0;
+  const dep = amount => Math.ceil(amount * rate / 100 / 10) * 10;
+  const note = text => `<div class="hint" style="font-size:12px;color:var(--sub);margin-top:4px">${text}</div>`;
+  if (r.type === 'auction') {
+    const n = Number(r.recruit) || 0;
+    return `
+      <div class="line"><span>경매 시작가</span><b>${won(total)}</b></div>
+      <div class="line"><span>분배 인원</span><b>${n ? n + '명' : '-'}</b></div>
+      <div class="line total"><span>시작가 기준 1인당 가격</span><span>${n >= 1 ? won(perPerson(total, n)) : '-'}</span></div>
+      ${note('총액 ÷ 분배 인원 (원 단위 올림)')}`;
+  }
+  if (r.method === 'unit') {
+    const q = Number(r.totalQty) || 0, u = esc(r.qtyUnit || '개');
+    const each = q >= 1 ? Math.ceil(total / q) : 0;
+    return `
+      <div class="line"><span>총 물품가격</span><b>${won(total)}</b></div>
+      <div class="line"><span>나눌 총 수량</span><b>${q ? q + u : '-'}</b></div>
+      <div class="line total"><span>${u}당 가격</span><span>${q ? won(each) : '-'}</span></div>
+      ${q ? note(`예: 3${u} 예약 → 상품 금액 ${won(each * 3)}, 예약금 ${won(dep(each * 3))} 선결제`) : note('총 물품가격 ÷ 총 수량 (원 단위 올림)')}`;
+  }
+  const n = Number(r.recruit) || 0, w = Number(r.totalWeight) || 0;
+  const each = n >= 1 ? Math.ceil(total / n) : 0;
   return `
-    <div class="line"><span>${r.type === 'auction' ? '경매 시작가' : '총 물품가격'}</span><b>${won(total)}</b></div>
-    <div class="line"><span>${r.type === 'auction' ? '분배 인원' : '모집인원'}</span><b>${n ? n + '명' : '-'}</b></div>
-    <div class="line total"><span>${label}1인당 가격</span><span>${n >= 1 ? won(perPerson(total, n)) : '-'}</span></div>
-    <div class="hint" style="font-size:12px;color:var(--sub);margin-top:4px">총 물품가격 ÷ 모집인원 (원 단위 올림)</div>`;
+    <div class="line"><span>총 물품가격</span><b>${won(total)}</b></div>
+    <div class="line"><span>총 중량 / 모집인원</span><b>${w ? fmtWeight(w, r.weightUnit) : '-'} / ${n ? n + '명' : '-'}</b></div>
+    <div class="line"><span>1인당 중량</span><b>${w && n ? fmtWeight(w / n, r.weightUnit) : '-'}</b></div>
+    <div class="line total"><span>1인당 가격</span><span>${n ? won(each) : '-'}</span></div>
+    ${n ? note(`1인 예약금 ${won(dep(each))} 선결제 · 잔금 ${won(each - dep(each))}은 거래 때`) : note('총 물품가격 ÷ 모집인원 (원 단위 올림)')}`;
 }
 
 // 사진을 최대 1080px JPEG로 줄여서 저장 (저장 공간 절약)
@@ -497,16 +657,31 @@ function resizeImage(file, max = 1080) {
 }
 
 function submitRegister() {
+  if (!S.reg) return;   // 두 번 연속 제출 방지
   const r = S.reg, err = document.getElementById('regErr');
+  const editing = r.editId && Store.product(r.editId);
   const total = Number(r.totalPrice), n = Number(r.recruit);
   const deadline = new Date(r.deadline), startAt = r.startAt ? new Date(r.startAt) : null;
+  const isInt = v => Number.isInteger(v);
   const problems = [];
   if (r.cat.some(c => !c)) problems.push('카테고리를 소분류까지 선택해 주세요.');
   if (!r.photos.length) problems.push('사진을 1장 이상 등록해 주세요.');
   if (!r.title.trim()) problems.push('상품명을 입력해 주세요.');
+  if (r.type === 'local' && !r.place.trim()) problems.push('거래 장소를 입력해 주세요.');
   if (!(total > 0)) problems.push('가격을 입력해 주세요.');
-  if (!(n >= 2) || !Number.isInteger(n)) problems.push('인원은 2명 이상 정수로 입력해 주세요.');
-  if (r.type === 'auction' && !(Number(r.bidUnit) > 0)) problems.push('입찰 단위를 입력해 주세요.');
+  if (r.type === 'auction') {
+    if (!(n >= 2) || !isInt(n)) problems.push('분배 인원은 2명 이상 정수로 입력해 주세요.');
+    if (!(Number(r.bidUnit) > 0)) problems.push('입찰 단위를 입력해 주세요.');
+  } else if (r.method === 'unit') {
+    const q = Number(r.totalQty);
+    if (!(q >= 2) || !isInt(q)) problems.push('나눌 총 수량은 2 이상 정수로 입력해 주세요.');
+    else if (editing && q < Store.reserved(editing)) problems.push(`이미 ${Store.reserved(editing)}${editing.qtyUnit} 예약되어 그보다 줄일 수 없어요.`);
+    if (!r.qtyUnit.trim()) problems.push('수량 단위를 입력해 주세요.');
+  } else {
+    if (!(Number(r.totalWeight) > 0)) problems.push('총 중량을 입력해 주세요.');
+    if (!(n >= 2) || !isInt(n)) problems.push('모집인원은 2명 이상 정수로 입력해 주세요.');
+    else if (editing && n < editing.reservations.length) problems.push(`이미 ${editing.reservations.length}명이 예약해 그보다 줄일 수 없어요.`);
+  }
   if (isNaN(deadline) || deadline <= Date.now()) problems.push('마감 일시는 현재 이후여야 합니다.');
   if (r.type !== 'local') {
     if (!startAt) problems.push('시작 일시를 입력해 주세요.');
@@ -515,17 +690,28 @@ function submitRegister() {
   if (problems.length) { err.innerHTML = problems.map(esc).join('<br>'); err.scrollIntoView({ block: 'center' }); return; }
 
   const me = Store.currentUser();
-  const p = Store.addProduct({
-    type: r.type, cat: [...r.cat], photos: r.photos, title: r.title.trim(), desc: r.desc.trim(),
-    totalPrice: total, recruit: n, deadline: deadline.toISOString(), sellerId: me.id,
-    ...(r.type === 'local' && { location: { lat: me.location.lat, lng: me.location.lng } }),
+  const data = {
+    type: r.type, cat: [...r.cat], photos: r.photos, title: r.title.trim(), desc: r.desc.trim(), place: r.place.trim(),
+    totalPrice: total, deadline: deadline.toISOString(),
     ...(r.type !== 'local' && { startAt: startAt.toISOString() }),
     ...(r.type === 'group' && { snsLink: r.snsLink.trim(), liveAt: r.liveAt ? new Date(r.liveAt).toISOString() : null }),
-    ...(r.type === 'auction' && { bidUnit: Number(r.bidUnit) }),
-  });
-  if (!p) return;
+    ...(r.type === 'auction' && { recruit: n, bidUnit: Number(r.bidUnit) }),
+    ...(r.type !== 'auction' && { depositRate: Number(r.depositRate), method: r.method }),
+    ...(r.type !== 'auction' && r.method === 'unit' && { totalQty: Number(r.totalQty), qtyUnit: r.qtyUnit.trim(), recruit: null, totalWeight: null }),
+    ...(r.type !== 'auction' && r.method === 'weight' && { totalWeight: Number(r.totalWeight), weightUnit: r.weightUnit, recruit: n, totalQty: null }),
+  };
+
+  let p;
+  if (editing) {
+    p = Store.updateProduct(editing.id, data);
+    if (!p) return;
+    toast('상품을 수정했어요');
+  } else {
+    p = Store.addProduct({ ...data, sellerId: me.id, ...(r.type === 'local' && { location: { lat: me.location.lat, lng: me.location.lng } }) });
+    if (!p) return;
+    toast('상품이 등록되었어요');
+  }
   S.reg = null;
-  toast('상품이 등록되었어요');
   location.replace('#/detail/' + p.id);
 }
 
@@ -575,7 +761,7 @@ function viewMy() {
   const all = Store.products();
   const tabs = {
     interest: ['관심 상품', Store.interests().map(id => Store.product(id)).filter(Boolean), '관심 상품이 없어요.'],
-    joined: ['참여 중', all.filter(p => p.participants.includes(me.id) || p.bids.some(b => b.userId === me.id)), '참여한 공구/경매가 없어요.'],
+    joined: ['예약·입찰', all.filter(p => p.reservations.some(r => r.userId === me.id) || p.bids.some(b => b.userId === me.id)), '예약한 공구나 입찰한 경매가 없어요.'],
     mine: ['내가 등록', all.filter(p => p.sellerId === me.id), '등록한 상품이 없어요.'],
   };
   const [, items, emptyMsg] = tabs[S.myTab];
@@ -619,11 +805,11 @@ function render() {
   saveScrollers();
   if (LIST_PAGES.includes(route)) $app.innerHTML = listPage(route, entering);
   else {
-    const views = { my: viewMy, register: viewRegister, detail: () => viewDetail(arg) };
+    const views = { my: viewMy, register: viewRegister, edit: () => viewEdit(arg), detail: () => viewDetail(arg) };
     $app.innerHTML = (views[route] || (() => listPage('home', entering)))();
   }
   S.route = route;
-  $tabbar.hidden = route === 'detail' || route === 'register';
+  $tabbar.hidden = ['detail', 'register', 'edit'].includes(route);
   $tabbar.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.nav === route));
   restoreScrollers(!entering);
 }
@@ -634,7 +820,23 @@ function rerender() {
   window.scrollTo(0, y);
 }
 
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+// 수정 화면: 내 상품일 때만, 폼 상태가 다른 상품이면 새로 불러옴
+function viewEdit(id) {
+  const p = Store.product(id);
+  if (!p || p.sellerId !== Store.currentUser().id) {
+    return `<header class="topbar"><button class="back" data-act="back" aria-label="뒤로">${icon('back', 22)}</button><h1>상품 수정</h1></header><div class="empty">수정할 수 없는 상품입니다.</div>`;
+  }
+  if (S.reg?.editId !== id) S.reg = editReg(p);
+  return viewRegister();
+}
+
+window.addEventListener('hashchange', () => {
+  S.sheet = null;
+  // 수정 화면을 벗어나 새 등록으로 가면 수정 중이던 폼은 버림
+  if (location.hash === '#/register' && S.reg?.editId) S.reg = null;
+  render();
+  window.scrollTo(0, 0);
+});
 $tabbar.addEventListener('click', e => { const b = e.target.closest('[data-nav]'); if (b) go(b.dataset.nav); });
 
 // ---------- 가로 스크롤 카테고리: 위치 유지, 선택 항목 가운데로, 가장자리 페이드, 마우스 드래그 ----------
@@ -737,12 +939,47 @@ $app.addEventListener('click', async e => {
       toast(on ? '관심 등록! 마이페이지 캘린더에 담았어요' : '캘린더에서 뺐어요');
       return rerender();
     }
-    case 'join':
-      try {
-        const p = Store.toggleJoin(d.id);
-        toast(p.participants.includes(Store.currentUser().id) ? '참여 완료!' : '참여를 취소했어요');
-      } catch (err) { toast(err.message); }
+    case 'edit': return go('edit/' + d.id);
+    case 'placeFromLoc':
+      S.reg.place = Store.currentUser().location.label;
       return rerender();
+    case 'openSheet':
+      S.sheet = { id: d.id, qty: 1, pay: 'kakao', paying: false };
+      return refreshSheet();
+    case 'closeSheet':
+      if (S.sheet?.paying) return;
+      S.sheet = null;
+      return refreshSheet();
+    case 'qtyMinus': case 'qtyPlus': {
+      const p = Store.product(S.sheet.id);
+      S.sheet.qty = Math.max(1, Math.min(Store.remaining(p), S.sheet.qty + (d.act === 'qtyPlus' ? 1 : -1)));
+      return refreshSheet();
+    }
+    case 'pay': {
+      const s = S.sheet;
+      s.paying = true;
+      refreshSheet();
+      // 테스트용 간편결제: 실제 PG 연동 전까지 결제 승인을 흉내만 낸다
+      await new Promise(r => setTimeout(r, 1200));
+      try {
+        const r = Store.reserve(s.id, { qty: s.qty, payMethod: s.pay });
+        if (!r) { s.paying = false; return refreshSheet(); }
+        S.sheet = null;
+        toast(`예약 완료! 예약금 ${won(r.deposit)} 결제됨`);
+        return rerender();
+      } catch (err) {
+        s.paying = false;
+        refreshSheet();
+        return toast(err.message);
+      }
+    }
+    case 'cancelResv': {
+      const p = Store.product(d.id), r = Store.myReservation(p);
+      if (!confirm(`예약을 취소할까요?\n예약금 ${won(r.deposit)}은 결제수단으로 환불돼요.`)) return;
+      Store.cancelReservation(d.id);
+      toast(`예약을 취소했어요 · 예약금 ${won(r.deposit)} 환불`);
+      return rerender();
+    }
     case 'bid':
       try {
         Store.placeBid(d.id, Number(document.getElementById('bidInput').value));
@@ -814,7 +1051,7 @@ $app.addEventListener('input', e => {
   }
   if (t.dataset.bind && S.reg) {
     S.reg[t.dataset.bind] = t.value;
-    if (['totalPrice', 'recruit'].includes(t.dataset.bind)) document.getElementById('calc').innerHTML = calcHtml(S.reg);
+    if (['totalPrice', 'recruit', 'totalWeight', 'weightUnit', 'totalQty', 'qtyUnit'].includes(t.dataset.bind)) document.getElementById('calc').innerHTML = calcHtml(S.reg);
   }
 });
 
@@ -836,6 +1073,9 @@ $app.addEventListener('change', async e => {
     return;
   }
   if (t.name === 'type' && S.reg) { S.reg.type = t.value; return rerender(); }
+  if (t.name === 'method' && S.reg) { S.reg.method = t.value; return rerender(); }
+  if (t.name === 'depositRate' && S.reg) { S.reg.depositRate = t.value; document.getElementById('calc').innerHTML = calcHtml(S.reg); return; }
+  if (t.name === 'pay' && S.sheet) { S.sheet.pay = t.value; return; }
   if (t.dataset.cat !== undefined) {
     const i = Number(t.dataset.cat);
     S.reg.cat[i] = t.value;

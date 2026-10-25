@@ -1,5 +1,5 @@
 // 오프라인에서도 앱 화면이 열리도록 정적 파일 캐시
-const CACHE = 'gonggu-v3';
+const CACHE = 'gonggu-v4';
 const ASSETS = ['./', './index.html', './css/style.css', './js/icons.js', './js/categories.js', './js/regions.js', './js/store.js', './js/app.js', './icon.svg', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
