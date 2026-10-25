@@ -177,6 +177,14 @@ a { color: var(--brand); }
 .calc .line { display: flex; justify-content: space-between; padding: 3px 0; }
 .calc .total { border-top: 1px solid #ffd3c2; margin-top: 6px; padding-top: 8px; font-weight: 800; font-size: 17px; color: var(--brand); }
 
+.region { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.region .dong { grid-column: 1 / -1; }
+.region select, .region .input {
+  width: 100%; padding: 12px; border: 1px solid #d9dde3; border-radius: 10px; background: #fff; font-size: 15px; color: var(--text);
+}
+.region select:focus, .region .input:focus { outline: 2px solid var(--brand); border-color: transparent; }
+.region-label { display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 10px 12px; background: var(--brand-soft); border-radius: 10px; font-size: 14px; color: var(--brand); }
+.region-label b { color: var(--text); }
 .loc-box { background: var(--bg); border-radius: 12px; padding: 12px; font-size: 13px; color: var(--sub); }
 .loc-box b { color: var(--text); }
 .err { color: #d93025; font-size: 13px; }

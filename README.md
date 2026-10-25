@@ -15,6 +15,7 @@ powershell -ExecutionPolicy Bypass -File gonggu-app/serve.ps1
 | 파일 | 내용 |
 |---|---|
 | `js/categories.js` | 대/중/소분류 카테고리 |
+| `js/regions.js` | 시/도·시/군/구 목록, GPS 좌표 → 주소 변환 (OpenStreetMap Nominatim, 상용화 시 카카오 로컬 API 권장) |
 | `js/store.js` | 데이터 저장소 (현재 localStorage, 서버 연동 시 이 파일만 교체) |
 | `js/app.js` | 화면: 로그인/회원가입, 홈, 카테고리, 상세, 상품등록, 마이페이지 |
 | `css/style.css` | 스타일 |

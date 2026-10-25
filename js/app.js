@@ -22,7 +22,8 @@ const S = {
   calSel: dkey(new Date()),
   myTab: 'interest',
   authMode: 'login',
-  signupLoc: null,
+  region: null,        // 동네 선택 중인 상태 (회원가입 / 마이페이지 재설정 공용)
+  relocating: false,
   reg: null,
 };
 
@@ -93,6 +94,98 @@ function getPosition() {
   });
 }
 
+// 화면 상단 등 좁은 곳에는 동 이름만
+const shortLoc = loc => loc.dong || loc.label;
+
+// ---------- 동네 선택: GPS → 시/도 · 시/군/구 · 읍/면/동 ----------
+const regionKey = (sido, sigungu) => `${sido}|${sigungu}`;
+const regionLabel = R => [R.sido, R.sigungu, R.dong].filter(Boolean).join(' ');
+
+function regionPickerHtml() {
+  const R = S.region;
+  if (!R) return `<div class="loc-box">가입하려면 현재 위치로 동네를 설정해야 합니다.</div>`;
+  if (R.status === 'loading') return `<div class="loc-box">현재 위치의 주소를 확인하는 중…</div>`;
+  if (R.status === 'error') {
+    return `<div class="loc-box"><span class="err">${esc(R.msg)}</span><br>
+      <button type="button" class="btn-sm" data-act="defaultLoc" style="margin-top:8px">테스트용 기본 위치(서울시청) 사용</button></div>`;
+  }
+  const sigungus = [...(REGIONS[R.sido] || [])];
+  // 위치 조회로 나온 시/군/구가 목록에 없으면 추가
+  for (const key of Object.keys(R.dongsBy)) {
+    const [sd, sg] = key.split('|');
+    if (sd === R.sido && sg && !sigungus.includes(sg)) sigungus.unshift(sg);
+  }
+  const dongs = R.dongsBy[regionKey(R.sido, R.sigungu)] || [];
+  const opt = (arr, sel) => arr.map(x => `<option ${x === sel ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  const dongField = dongs.length && !R.custom
+    ? `<select data-region="dong">${opt(dongs, R.dong)}<option value="__custom">직접 입력</option></select>`
+    : `<input class="input" data-region-text placeholder="읍/면/동 입력 (예: 중곡동)" value="${esc(R.dong)}">`;
+  return `
+    ${R.msg ? `<div class="hint err" style="margin-bottom:6px">${esc(R.msg)}</div>` : ''}
+    <div class="region">
+      <select data-region="sido"><option value="">시/도</option>${opt(Object.keys(REGIONS), R.sido)}</select>
+      ${sigungus.length ? `<select data-region="sigungu"><option value="">시/군/구</option>${opt(sigungus, R.sigungu)}</select>` : '<span></span>'}
+      <div class="dong">${dongField}</div>
+    </div>
+    <div class="region-label">${icon('pin', 16)}<b id="regionLabel">${esc(regionLabel(R)) || '동네를 선택하세요'}</b></div>
+    <div class="hint">${R.scanning ? '주변 동네를 찾는 중… 목록에 추가돼요' : 'GPS 위치 기준으로 주변 동네가 목록에 들어 있어요'}</div>`;
+}
+
+function refreshPicker() {
+  const el = document.getElementById('regionPicker');
+  if (el) el.innerHTML = regionPickerHtml();
+}
+
+async function startRegion(pos) {
+  Geo.cancel();
+  const R = S.region = { lat: pos.lat, lng: pos.lng, sido: '', sigungu: '', dong: '', dongsBy: {}, custom: false, status: 'loading' };
+  refreshPicker();
+  const addResult = r => {
+    const list = R.dongsBy[regionKey(r.sido, r.sigungu)] ||= [];
+    for (const d of r.dongs) if (!list.includes(d)) list.push(d);
+  };
+  try {
+    const r = await Geo.reverse(pos.lat, pos.lng);
+    if (S.region !== R) return;
+    addResult(r);
+    Object.assign(R, { sido: r.sido, sigungu: r.sigungu, dong: r.dongs[0] || '', status: 'ready', scanning: true });
+  } catch {
+    if (S.region !== R) return;
+    Object.assign(R, { status: 'ready', msg: '주소를 자동으로 찾지 못했어요. 직접 선택해 주세요.' });
+  }
+  refreshPicker();
+  if (!R.scanning) return;
+  await Geo.nearby(pos.lat, pos.lng, r => {
+    if (S.region !== R) return;
+    addResult(r);
+    if (!R.dong) R.dong = (R.dongsBy[regionKey(R.sido, R.sigungu)] || [])[0] || '';
+    // 사용자가 입력 중일 때 화면을 다시 그리면 포커스가 사라지므로 직접 입력 중엔 건너뜀
+    if (!(R.custom && document.activeElement?.dataset.regionText !== undefined)) refreshPicker();
+  });
+  if (S.region === R) { R.scanning = false; refreshPicker(); }
+}
+
+async function regionFromGps() {
+  S.region = { status: 'loading' };
+  refreshPicker();
+  try {
+    await startRegion(await getPosition());
+  } catch (e) {
+    S.region = { status: 'error', msg: e.message };
+    refreshPicker();
+  }
+}
+
+// 선택이 끝났으면 저장할 위치 객체, 아니면 에러 메시지
+function regionResult() {
+  const R = S.region;
+  if (!R || R.status !== 'ready') return { error: '현재 위치로 동네를 설정해 주세요.' };
+  if (!R.sido) return { error: '시/도를 선택해 주세요.' };
+  if ((REGIONS[R.sido] || []).length && !R.sigungu) return { error: '시/군/구를 선택해 주세요.' };
+  if (!R.dong.trim()) return { error: '읍/면/동을 선택하거나 입력해 주세요.' };
+  return { location: { lat: R.lat, lng: R.lng, sido: R.sido, sigungu: R.sigungu, dong: R.dong.trim(), label: regionLabel({ ...R, dong: R.dong.trim() }) } };
+}
+
 // 동네 상품은 내 위치 기준 설정 반경 안에 있는 것만
 function visible(list) {
   const me = Store.currentUser();
@@ -139,7 +232,7 @@ function topbar(title) {
   const me = Store.currentUser();
   const left = title
     ? `<h1>${title}</h1>`
-    : `<button class="loc-btn" data-go="my">${icon('pin', 18)}${esc(me.location.label)}<small>${fmtRadius(me.radius)}</small></button><span class="spacer"></span>`;
+    : `<button class="loc-btn" data-go="my">${icon('pin', 18)}${esc(shortLoc(me.location))}<small>${fmtRadius(me.radius)}</small></button><span class="spacer"></span>`;
   return `<header class="topbar">${left}<button class="reg-btn" data-go="register">${icon('plus', 16)}상품등록</button></header>`;
 }
 
@@ -181,7 +274,6 @@ function viewAuth() {
         <div class="switch">처음이신가요? <button type="button" data-auth="signup">회원가입</button></div>
       </form>`;
   }
-  const loc = S.signupLoc;
   return `${hero}
     <form class="form" id="signupForm">
       <div class="field"><label>아이디</label><input class="input" name="id" placeholder="영문/숫자 4~20자" pattern="[A-Za-z0-9]{4,20}" autocomplete="username" required></div>
@@ -190,9 +282,8 @@ function viewAuth() {
       <div class="field">
         <span class="label">내 동네 설정 (GPS)</span>
         <button type="button" class="btn line icon-btn" data-act="gps">${icon('pin', 18)}현재 위치로 동네 설정</button>
-        <div class="loc-box" id="locBox" style="margin-top:8px">${loc ? locText(loc) : '가입하려면 현재 위치를 설정해야 합니다.'}</div>
+        <div id="regionPicker" style="margin-top:8px">${regionPickerHtml()}</div>
       </div>
-      <div class="field"><label>동네 이름</label><input class="input" name="label" placeholder="예: 역삼동" required value="${esc(loc?.label || '')}"></div>
       <div class="field">
         <span class="label">동네 페이지 노출 반경</span>
         <div class="radio-row">${RADII.map(r => `<label><input type="radio" name="radius" value="${r}" ${r === 1000 ? 'checked' : ''}><span>${fmtRadius(r)}</span></label>`).join('')}</div>
@@ -202,19 +293,6 @@ function viewAuth() {
       <button class="btn">가입하기</button>
       <div class="switch">이미 계정이 있나요? <button type="button" data-auth="login">로그인</button></div>
     </form>`;
-}
-
-const locText = loc => `위치 설정 완료<br><b>위도 ${loc.lat.toFixed(5)}, 경도 ${loc.lng.toFixed(5)}</b>`;
-
-async function setSignupGps() {
-  const box = document.getElementById('locBox');
-  box.textContent = '현재 위치를 확인하는 중…';
-  try {
-    S.signupLoc = await getPosition();
-    box.innerHTML = locText(S.signupLoc);
-  } catch (e) {
-    box.innerHTML = `<span class="err">${esc(e.message)}</span><br><button type="button" class="btn-sm" data-act="defaultLoc" style="margin-top:8px">테스트용 기본 위치(서울시청) 사용</button>`;
-  }
 }
 
 // ---------- 화면: 홈 / 동네 / 공구 / 경매 ----------
@@ -254,7 +332,7 @@ function results(route) {
   }
 
   if (route === 'local') {
-    return `<div class="section"><h2>${q.trim() ? `'${esc(q.trim())}' 검색 결과` : '최신 등록 상품'} <small>${esc(me.location.label)} 반경 ${fmtRadius(me.radius)}</small></h2>
+    return `<div class="section"><h2>${q.trim() ? `'${esc(q.trim())}' 검색 결과` : '최신 등록 상품'} <small>${esc(shortLoc(me.location))} 반경 ${fmtRadius(me.radius)}</small></h2>
       ${list(filtered.sort(byNewest), filtering ? '조건에 맞는 상품이 없어요.' : '반경 안에 등록된 상품이 없어요.<br>반경을 넓히거나 첫 상품을 등록해 보세요!')}</div>`;
   }
 
@@ -509,7 +587,10 @@ function viewMy() {
     <div class="box">
       <h3>내 동네 설정</h3>
       <div class="radio-row" style="margin-bottom:10px">${RADII.map(r => `<label><input type="radio" name="myRadius" value="${r}" ${me.radius === r ? 'checked' : ''}><span>${fmtRadius(r)}</span></label>`).join('')}</div>
-      <button class="btn line icon-btn" data-act="regps" style="padding:10px;font-size:14px">${icon('pin', 16)}현재 위치로 동네 다시 설정</button>
+      ${S.relocating ? `
+        <div id="regionPicker">${regionPickerHtml()}</div>
+        <div class="row" style="margin-top:10px"><button class="btn line" data-act="cancelRegion" style="padding:10px;font-size:14px">취소</button><button class="btn" data-act="saveRegion" style="padding:10px;font-size:14px">이 동네로 저장</button></div>`
+      : `<button class="btn line icon-btn" data-act="regps" style="padding:10px;font-size:14px">${icon('pin', 16)}현재 위치로 동네 다시 설정</button>`}
     </div>
 
     <div class="box" style="padding:14px 0">
@@ -645,12 +726,8 @@ $app.addEventListener('click', async e => {
 
   switch (d.act) {
     case 'back': return history.length > 1 ? history.back() : go('home');
-    case 'gps': return setSignupGps();
-    case 'defaultLoc':
-      S.signupLoc = { lat: DEFAULT_LOC.lat, lng: DEFAULT_LOC.lng };
-      document.getElementById('locBox').innerHTML = locText(S.signupLoc);
-      document.querySelector('[name=label]').value ||= DEFAULT_LOC.label;
-      return;
+    case 'gps': return regionFromGps();
+    case 'defaultLoc': return startRegion(DEFAULT_LOC);
     case 'clearSearch':
       S.q[S.route] = '';
       rerender();
@@ -681,15 +758,20 @@ $app.addEventListener('click', async e => {
     case 'calNext': S.calMonth = new Date(S.calMonth.getFullYear(), S.calMonth.getMonth() + 1, 1); return rerender();
     case 'logout': Store.logout(); S.authMode = 'login'; return go('home');
     case 'regps':
-      try {
-        const pos = await getPosition();
-        const label = prompt('동네 이름을 입력하세요', Store.currentUser().location.label);
-        if (label === null) return;
-        Store.updateUser({ location: { ...pos, label: label.trim() || '내 동네' } });
-        toast('동네 위치를 다시 설정했어요');
-        rerender();
-      } catch (err) { toast(err.message); }
-      return;
+      S.relocating = true;
+      rerender();
+      return regionFromGps();
+    case 'cancelRegion':
+      Geo.cancel(); S.relocating = false; S.region = null;
+      return rerender();
+    case 'saveRegion': {
+      const { location, error } = regionResult();
+      if (error) return toast(error);
+      Geo.cancel(); S.relocating = false; S.region = null;
+      Store.updateUser({ location });
+      toast(`${location.dong}(으)로 동네를 바꿨어요`);
+      return rerender();
+    }
   }
 });
 
@@ -706,8 +788,10 @@ $app.addEventListener('submit', async e => {
       if (!/^[A-Za-z0-9]{4,20}$/.test(v.id)) throw new Error('아이디는 영문/숫자 4~20자로 입력해 주세요.');
       if (v.pw.length < 6) throw new Error('비밀번호는 6자 이상이어야 합니다.');
       if (v.pw !== v.pw2) throw new Error('비밀번호가 일치하지 않습니다.');
-      if (!S.signupLoc) throw new Error('현재 위치로 동네를 설정해 주세요.');
-      await Store.signup({ id: v.id, pw: v.pw, radius: Number(v.radius), location: { ...S.signupLoc, label: v.label.trim() } });
+      const { location, error } = regionResult();
+      if (error) throw new Error(error);
+      await Store.signup({ id: v.id, pw: v.pw, radius: Number(v.radius), location });
+      Geo.cancel(); S.region = null;
       toast('가입을 환영해요!');
     }
     go('home');
@@ -723,6 +807,11 @@ $app.addEventListener('input', e => {
     document.getElementById('results').innerHTML = results(S.route);
     return;
   }
+  if (t.dataset.regionText !== undefined && S.region) {
+    S.region.dong = t.value;
+    document.getElementById('regionLabel').textContent = regionLabel(S.region) || '동네를 선택하세요';
+    return;
+  }
   if (t.dataset.bind && S.reg) {
     S.reg[t.dataset.bind] = t.value;
     if (['totalPrice', 'recruit'].includes(t.dataset.bind)) document.getElementById('calc').innerHTML = calcHtml(S.reg);
@@ -734,6 +823,18 @@ $app.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.datase
 
 $app.addEventListener('change', async e => {
   const t = e.target;
+  if (t.dataset.region && S.region) {
+    const R = S.region, v = t.value;
+    if (t.dataset.region === 'sido') Object.assign(R, { sido: v, sigungu: '', dong: '', custom: false });
+    if (t.dataset.region === 'sigungu') Object.assign(R, { sigungu: v, dong: (R.dongsBy[regionKey(R.sido, v)] || [])[0] || '', custom: false });
+    if (t.dataset.region === 'dong') {
+      if (v === '__custom') Object.assign(R, { custom: true, dong: '' });
+      else R.dong = v;
+    }
+    refreshPicker();
+    if (R.custom) document.querySelector('[data-region-text]')?.focus();
+    return;
+  }
   if (t.name === 'type' && S.reg) { S.reg.type = t.value; return rerender(); }
   if (t.dataset.cat !== undefined) {
     const i = Number(t.dataset.cat);

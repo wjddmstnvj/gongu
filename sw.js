@@ -1,6 +1,6 @@
 // 오프라인에서도 앱 화면이 열리도록 정적 파일 캐시
-const CACHE = 'gonggu-v2';
-const ASSETS = ['./', './index.html', './css/style.css', './js/icons.js', './js/categories.js', './js/store.js', './js/app.js', './icon.svg', './manifest.webmanifest'];
+const CACHE = 'gonggu-v3';
+const ASSETS = ['./', './index.html', './css/style.css', './js/icons.js', './js/categories.js', './js/regions.js', './js/store.js', './js/app.js', './icon.svg', './manifest.webmanifest'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -14,7 +14,7 @@ self.addEventListener('activate', e => {
 
 // 네트워크 우선, 실패 시 캐시
 self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
+  if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
     fetch(e.request)
       .then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })
